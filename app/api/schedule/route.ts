@@ -35,7 +35,16 @@ export async function POST(request: Request) {
 
     const destinationUrl = `${protocol}://${host}/api/post`;
 
-    // Publish the message to QStash, telling it to deliver it AT the scheduled time
+    // Initialize Redis if configured
+    let redis: any = null;
+    if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
+      const { Redis } = require('@upstash/redis');
+      redis = new Redis({
+        url: process.env.UPSTASH_REDIS_REST_URL,
+        token: process.env.UPSTASH_REDIS_REST_TOKEN,
+      });
+    }
+
     const res = await qstashClient.publishJSON({
       url: destinationUrl,
       body: {
@@ -44,9 +53,22 @@ export async function POST(request: Request) {
         description,
         platforms,
       },
-      notBefore: notBefore, // Delay delivery until this timestamp
-      retries: 3, // If our posting API fails, Upstash will retry 3 times
+      notBefore: notBefore,
+      retries: 3,
     });
+
+    if (redis) {
+      await redis.hset('app:posts', {
+        [res.messageId]: {
+          id: res.messageId,
+          blobName,
+          platforms,
+          scheduleTime,
+          status: 'PENDING',
+          createdAt: new Date().toISOString(),
+        }
+      });
+    }
 
     return NextResponse.json({ success: true, messageId: res.messageId });
   } catch (error: any) {

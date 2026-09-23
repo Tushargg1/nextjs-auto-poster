@@ -1,18 +1,35 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { upload } from '@vercel/blob/client';
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [description, setDescription] = useState('');
   const [scheduleTime, setScheduleTime] = useState('');
-  const [platforms, setPlatforms] = useState({ youtube: true, facebook: true });
+  const [platforms, setPlatforms] = useState({ youtube: true, facebook: true, instagram: false });
   const [status, setStatus] = useState({ type: '', message: '' });
   const [isLoading, setIsLoading] = useState(false);
+  const [history, setHistory] = useState<any[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handlePlatformChange = (platform: 'youtube' | 'facebook') => {
+  const fetchHistory = async () => {
+    try {
+      const res = await fetch('/api/history');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.posts) setHistory(data.posts);
+      }
+    } catch (e) {
+      console.error('Failed to fetch history', e);
+    }
+  };
+
+  useEffect(() => {
+    fetchHistory();
+  }, []);
+
+  const handlePlatformChange = (platform: 'youtube' | 'facebook' | 'instagram') => {
     setPlatforms(prev => ({ ...prev, [platform]: !prev[platform] }));
   };
 
@@ -22,7 +39,7 @@ export default function Home() {
       setStatus({ type: 'error', message: 'Please select a video file.' });
       return;
     }
-    if (!platforms.youtube && !platforms.facebook) {
+    if (!platforms.youtube && !platforms.facebook && !platforms.instagram) {
       setStatus({ type: 'error', message: 'Please select at least one platform.' });
       return;
     }
@@ -35,7 +52,6 @@ export default function Home() {
     setStatus({ type: 'info', message: 'Uploading video to Vercel Blob (this may take a minute)...' });
 
     try {
-      // 1. Upload to Vercel Blob
       const blob = await upload(file.name, file, {
         access: 'public',
         handleUploadUrl: '/api/upload',
@@ -43,7 +59,6 @@ export default function Home() {
 
       setStatus({ type: 'info', message: 'Video uploaded! Scheduling the post...' });
 
-      // 2. Schedule with Upstash QStash
       const scheduleRes = await fetch('/api/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -52,7 +67,7 @@ export default function Home() {
           blobName: file.name,
           description: description,
           platforms: Object.keys(platforms).filter((p) => platforms[p as keyof typeof platforms]),
-          scheduleTime: scheduleTime, // Expecting UTC or valid ISO
+          scheduleTime: scheduleTime,
         }),
       });
 
@@ -61,10 +76,12 @@ export default function Home() {
 
       setStatus({ type: 'success', message: 'Post successfully scheduled!' });
       
-      // Reset form
       setFile(null);
       setDescription('');
       if (fileInputRef.current) fileInputRef.current.value = '';
+      
+      // Refresh history
+      fetchHistory();
     } catch (err: any) {
       console.error(err);
       setStatus({ type: 'error', message: err.message || 'An error occurred' });
@@ -74,7 +91,7 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+    <main className="min-h-screen bg-slate-50 flex flex-col items-center py-10 px-4 space-y-8">
       <div className="max-w-xl w-full bg-white p-8 rounded-2xl shadow-xl border border-slate-100">
         <div className="text-center mb-8">
           <div className="mx-auto h-12 w-12 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center mb-4">
@@ -82,7 +99,7 @@ export default function Home() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
             </svg>
           </div>
-          <h2 className="text-3xl font-extrabold text-slate-900">Next.js Auto-Poster</h2>
+          <h2 className="text-3xl font-extrabold text-slate-900">AI Auto-Poster</h2>
           <p className="mt-2 text-sm text-slate-500">Serverless scheduling powered by Vercel & Upstash</p>
         </div>
 
@@ -107,7 +124,7 @@ export default function Home() {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={3}
-              placeholder="Leave blank to let AI do the magic! ✨"
+              placeholder="Leave blank to let AI do the magic! o""
               className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
             />
           </div>
@@ -122,6 +139,10 @@ export default function Home() {
               <label className="flex items-center space-x-2">
                 <input type="checkbox" checked={platforms.facebook} onChange={() => handlePlatformChange('facebook')} className="rounded text-indigo-600" />
                 <span className="text-sm font-medium text-slate-700">Facebook</span>
+              </label>
+              <label className="flex items-center space-x-2">
+                <input type="checkbox" checked={platforms.instagram} onChange={() => handlePlatformChange('instagram')} className="rounded text-indigo-600" />
+                <span className="text-sm font-medium text-slate-700">Instagram</span>
               </label>
             </div>
           </div>
@@ -154,6 +175,47 @@ export default function Home() {
             {status.message}
           </div>
         )}
+      </div>
+
+      <div className="max-w-xl w-full bg-white p-8 rounded-2xl shadow-xl border border-slate-100">
+         <h3 className="text-xl font-bold text-slate-900 mb-4">Post History</h3>
+         {history.length === 0 ? (
+            <p className="text-sm text-slate-500">No posts scheduled yet.</p>
+         ) : (
+            <div className="overflow-x-auto">
+               <table className="w-full text-sm text-left text-slate-500">
+                  <thead className="text-xs text-slate-700 uppercase bg-slate-50">
+                     <tr>
+                        <th className="px-4 py-3">Video</th>
+                        <th className="px-4 py-3">Platforms</th>
+                        <th className="px-4 py-3">Time</th>
+                        <th className="px-4 py-3">Status</th>
+                     </tr>
+                  </thead>
+                  <tbody>
+                     {history.map((post, i) => (
+                        <tr key={i} className="border-b">
+                           <td className="px-4 py-3 font-medium text-slate-900">{post.blobName}</td>
+                           <td className="px-4 py-3 capitalize">{post.platforms?.join(', ')}</td>
+                           <td className="px-4 py-3">{new Date(post.scheduleTime).toLocaleString()}</td>
+                           <td className="px-4 py-3">
+                              <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                                post.status === 'POSTED' ? 'bg-green-100 text-green-800' :
+                                post.status === 'PENDING' ? 'bg-yellow-100 text-yellow-800' :
+                                'bg-blue-100 text-blue-800'
+                              }`}>
+                                {post.status}
+                              </span>
+                           </td>
+                        </tr>
+                     ))}
+                  </tbody>
+               </table>
+            </div>
+         )}
+         <button onClick={fetchHistory} className="mt-4 text-sm text-indigo-600 hover:underline">
+            Refresh History
+         </button>
       </div>
     </main>
   );

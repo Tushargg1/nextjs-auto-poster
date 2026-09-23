@@ -4,15 +4,18 @@ import { del } from '@vercel/blob';
 import { google } from 'googleapis';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { Readable } from 'stream';
+import { Redis } from '@upstash/redis';
+import { Client } from '@upstash/qstash';
 
-// Tell Vercel to allow this function to run for up to 60 seconds
 export const maxDuration = 60;
 
-// Upstash QStash webhook handler
 async function handler(request: Request) {
   try {
     const body = await request.json();
     let { videoUrl, blobName, description, platforms } = body;
+    
+    // Upstash sends the original messageId in the headers
+    const messageId = request.headers.get('upstash-message-id');
 
     console.log(`Webhook triggered for video: ${blobName}`);
 
@@ -27,102 +30,94 @@ async function handler(request: Request) {
       if (process.env.GEMINI_API_KEY) {
         console.log('Generating AI caption...');
         const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }); // Flash is faster for serverless
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         
-        // We can pass the inline data directly to Gemini without saving to disk
         const prompt = "Watch this video and write an engaging, viral social media caption with 3-5 trending hashtags. Do not include quotes.";
         
         const result = await model.generateContent([
           prompt,
-          {
-            inlineData: {
-              data: videoBuffer.toString("base64"),
-              mimeType: "video/mp4"
-            }
-          }
+          { inlineData: { data: videoBuffer.toString("base64"), mimeType: "video/mp4" } }
         ]);
         description = result.response.text().trim();
-        console.log('Generated Caption:', description);
       } else {
         description = "Check out this new video! 🔥 #viral";
       }
     }
 
     // 2. Upload to YouTube
-    if (platforms.includes('youtube')) {
-      if (process.env.YOUTUBE_CLIENT_ID && process.env.YOUTUBE_CLIENT_SECRET && process.env.YOUTUBE_REFRESH_TOKEN) {
+    if (platforms.includes('youtube') && process.env.YOUTUBE_CLIENT_ID && process.env.YOUTUBE_REFRESH_TOKEN) {
         console.log('Uploading to YouTube...');
-        const oauth2Client = new google.auth.OAuth2(
-          process.env.YOUTUBE_CLIENT_ID,
-          process.env.YOUTUBE_CLIENT_SECRET,
-          'https://developers.google.com/oauthplayground'
-        );
+        const oauth2Client = new google.auth.OAuth2(process.env.YOUTUBE_CLIENT_ID, process.env.YOUTUBE_CLIENT_SECRET, 'https://developers.google.com/oauthplayground');
         oauth2Client.setCredentials({ refresh_token: process.env.YOUTUBE_REFRESH_TOKEN });
-
         const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
         
-        // Convert Buffer to Readable Stream for googleapis
         const stream = new Readable();
         stream.push(videoBuffer);
         stream.push(null);
 
         await youtube.videos.insert({
           part: ['snippet', 'status'],
-          requestBody: {
-            snippet: {
-              title: `Short - ${blobName}`,
-              description: description,
-              categoryId: '22',
-            },
-            status: {
-              privacyStatus: 'public',
-              selfDeclaredMadeForKids: false,
-            },
-          },
-          media: {
-            body: stream,
-          },
+          requestBody: { snippet: { title: `Short - ${blobName}`, description, categoryId: '22' }, status: { privacyStatus: 'public', selfDeclaredMadeForKids: false } },
+          media: { body: stream },
         });
-        console.log('YouTube upload complete.');
-      } else {
-        console.warn('YouTube credentials missing. Skipping YouTube upload.');
-      }
     }
 
     // 3. Upload to Facebook
-    if (platforms.includes('facebook')) {
-      if (process.env.FACEBOOK_PAGE_ID && process.env.META_ACCESS_TOKEN) {
+    if (platforms.includes('facebook') && process.env.FACEBOOK_PAGE_ID && process.env.META_ACCESS_TOKEN) {
         console.log('Uploading to Facebook...');
         const fbUrl = `https://graph.facebook.com/v20.0/${process.env.FACEBOOK_PAGE_ID}/videos`;
-        
         const formData = new FormData();
         formData.append('description', description);
         formData.append('access_token', process.env.META_ACCESS_TOKEN);
-        
-        // Convert Buffer to Blob for fetch API
-        const videoBlob = new Blob([videoBuffer], { type: 'video/mp4' });
-        formData.append('source', videoBlob, blobName);
-
-        const fbResponse = await fetch(fbUrl, {
-          method: 'POST',
-          body: formData,
-        });
-        
-        const fbResult = await fbResponse.json();
-        if (!fbResponse.ok) {
-           console.error('Facebook upload error:', fbResult);
-           // We do not throw here so we can still clean up the Vercel Blob
-        } else {
-           console.log('Facebook upload complete. ID:', fbResult.id);
-        }
-      } else {
-        console.warn('Facebook credentials missing. Skipping Facebook upload.');
-      }
+        formData.append('source', new Blob([videoBuffer], { type: 'video/mp4' }), blobName);
+        await fetch(fbUrl, { method: 'POST', body: formData });
     }
 
-    // 4. Clean up Vercel Blob
-    console.log('Cleaning up video from Vercel Blob...');
-    await del(videoUrl);
+    // 4. Instagram Step 1 (Container Creation)
+    let isIgDelayed = false;
+    if (platforms.includes('instagram') && process.env.INSTAGRAM_ACCOUNT_ID && process.env.META_ACCESS_TOKEN) {
+       console.log('Creating Instagram Container...');
+       const igUrl = `https://graph.facebook.com/v20.0/${process.env.INSTAGRAM_ACCOUNT_ID}/media?media_type=REELS&video_url=${encodeURIComponent(videoUrl)}&caption=${encodeURIComponent(description)}&access_token=${process.env.META_ACCESS_TOKEN}`;
+       const igRes = await fetch(igUrl, { method: 'POST' });
+       const igData = await igRes.json();
+       
+       if (igData.id) {
+         // Schedule Step 2
+         const protocol = process.env.NODE_ENV === 'development' ? 'http' : 'https';
+         const host = request.headers.get('host') || process.env.VERCEL_PROJECT_PRODUCTION_URL;
+         const qstash = new Client({ token: process.env.QSTASH_TOKEN! });
+         await qstash.publishJSON({
+            url: `${protocol}://${host}/api/publish-ig`,
+            body: { containerId: igData.id, videoUrl, messageId },
+            delay: 120, // Wait 2 minutes for IG to process the video
+         });
+         isIgDelayed = true;
+       } else {
+         console.error('Instagram Container Error:', igData);
+       }
+    }
+
+    // 5. Cleanup and Status Update
+    if (!isIgDelayed) {
+       console.log('Cleaning up Vercel Blob...');
+       await del(videoUrl);
+       
+       if (messageId && process.env.UPSTASH_REDIS_REST_URL) {
+         const redis = new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN! });
+         const existing = await redis.hget('app:posts', messageId);
+         if (existing) {
+           await redis.hset('app:posts', { [messageId]: { ...(existing as any), status: 'POSTED' } });
+         }
+       }
+    } else {
+       if (messageId && process.env.UPSTASH_REDIS_REST_URL) {
+         const redis = new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN! });
+         const existing = await redis.hget('app:posts', messageId);
+         if (existing) {
+           await redis.hset('app:posts', { [messageId]: { ...(existing as any), status: 'IG_PROCESSING' } });
+         }
+       }
+    }
 
     return NextResponse.json({ success: true });
   } catch (error: any) {
@@ -131,5 +126,4 @@ async function handler(request: Request) {
   }
 }
 
-// Wrap the handler with Upstash signature verification to ensure only Upstash can call this API
 export const POST = verifySignatureAppRouter(handler);
