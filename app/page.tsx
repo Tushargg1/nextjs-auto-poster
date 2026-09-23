@@ -124,7 +124,7 @@ export default function Home() {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={3}
-              placeholder="Leave blank to let AI do the magic! o""
+              placeholder="Leave blank to let AI do the magic!"
               className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
             />
           </div>
